@@ -8,17 +8,22 @@ import xml.etree.ElementTree as ET
 
 def download_pdf(url, output_folder, source_name):
     try:
+        filename = os.path.basename(urlparse(url).path)
+        file_path = os.path.join(output_folder, filename)
+        if os.path.exists(file_path):
+            logging.info(f"[{source_name}] File already exists: {filename}")
+            return False  # File already exists; do not count towards new downloads
+
         headers = {'User-Agent': 'Mozilla/5.0 (compatible; PDFDownloader/1.0)'}
         response = requests.get(url, headers=headers, stream=True, timeout=10)
         if response.status_code == 200:
             content_type = response.headers.get('Content-Type', '')
             if 'application/pdf' in content_type or url.lower().endswith('.pdf'):
-                filename = os.path.join(output_folder, os.path.basename(urlparse(url).path))
-                with open(filename, 'wb') as f:
+                with open(file_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
-                logging.info(f"Downloaded from {source_name}: {filename}")
-                return True
+                logging.info(f"[{source_name}] Downloaded: {filename}")
+                return True  # New file downloaded
             else:
                 logging.warning(f"[{source_name}] URL does not point to a PDF: {url}")
                 return False
@@ -29,14 +34,21 @@ def download_pdf(url, output_folder, source_name):
         logging.error(f"[{source_name}] Exception occurred while downloading {url}: {e}")
         return False
 
-def download_from_source(name, urls, num_pdfs, output_folder):
+def download_from_source(name, source_function, num_pdfs, output_folder):
     count = 0
-    for url in urls:
-        if count >= num_pdfs:
-            break
-        if download_pdf(url, output_folder, name):
-            count += 1
-    logging.info(f"Downloaded {count} PDFs from {name}")
+    start = 0
+    batch_size = 100  # Number of PDFs to fetch in each batch
+    while count < num_pdfs:
+        urls = source_function(batch_size, start)
+        if not urls:
+            break  # No more URLs to process
+        for url in urls:
+            if count >= num_pdfs:
+                break
+            if download_pdf(url, output_folder, name):
+                count += 1
+        start += batch_size
+    logging.info(f"Downloaded {count} new PDFs from {name}")
 
 def download_pdfs(output_folder, num_pdfs):
     sources = [
@@ -53,8 +65,10 @@ def download_pdfs(output_folder, num_pdfs):
 
     for i, source in enumerate(sources):
         num_to_download = pdfs_per_source + (1 if i < remaining_pdfs else 0)
-        urls = source['function'](num_to_download)
-        thread = threading.Thread(target=download_from_source, args=(source['name'], urls, num_to_download, output_folder))
+        thread = threading.Thread(
+            target=download_from_source,
+            args=(source['name'], source['function'], num_to_download, output_folder)
+        )
         threads.append(thread)
         thread.start()
 
@@ -63,13 +77,13 @@ def download_pdfs(output_folder, num_pdfs):
 
     logging.info("Download completed.")
 
-def get_arxiv_pdf_links(num_pdfs):
+def get_arxiv_pdf_links(num_pdfs, start=0):
     pdf_links = []
     try:
         base_url = 'http://export.arxiv.org/api/query'
         params = {
             'search_query': 'all',
-            'start': 0,
+            'start': start,
             'max_results': num_pdfs,
             'sortBy': 'lastUpdatedDate',
             'sortOrder': 'descending'
