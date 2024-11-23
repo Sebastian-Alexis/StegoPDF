@@ -8,12 +8,27 @@ from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val
 from sklearn.metrics import accuracy_score, classification_report
 import fitz  # PyMuPDF
 import PyPDF2
+import re
 
 # Paths to folders and JSON file
 CLEAN_FOLDER = 'clean'
 DIRTY_FOLDER = 'dirty'
 METADATA_JSON_PATH = 'injection_log.json'
 CACHE_FILE_PATH = 'feature_cache.json'
+
+# Malicious JavaScript patterns
+MALICIOUS_JS_PATTERNS = [
+    re.compile(r"eval\(String\.fromCharCode\(.*?\)\);"),
+    re.compile(r"app\.alert\(\{cMsg: .*?, nIcon: .*?\}\);"),
+    re.compile(r"var docTitle = this\.documentFileName; if \(docTitle\) app\.alert\(.*?\);"),
+    re.compile(r"try \{ console\.show\(\); console\.println\(.*?\); \} catch \(e\) \{ app\.alert\(.*?\); \}"),
+    re.compile(r"app\.setInterval\(\"app\.alert\(.*?\);\", \d+\);"),
+    re.compile(r"function .*?\(\) \{ app\.alert\(.*?\); \} .*?\(\);"),
+    re.compile(r"var userResponse = app\.response\(.*?\); app\.alert\(.*?\);"),
+    re.compile(r"app\.launchURL\(.*?\); app\.alert\(.*?\);"),
+    re.compile(r"var .*? = \[\]; .*?\.push\(.*?\); .*?\.push\(.*?\); app\.alert\(.*?\.join\(.*?\)\);"),
+    re.compile(r"app\.alert\(unescape\(.*?\)\);")
+]
 
 # Function to generate a hash for a file
 def generate_file_hash(file_path):
@@ -39,42 +54,51 @@ def save_cache(cache):
 def extract_javascript_with_pymupdf(pdf_path):
     try:
         document = fitz.open(pdf_path)
+        js_types = [0] * len(MALICIOUS_JS_PATTERNS)
         for page_number in range(len(document)):
             page = document.load_page(page_number)
             annot = page.first_annot
             while annot:
                 if annot.type[0] == 21:  # Check if annotation is JavaScript
-                    return 1  # JavaScript found
+                    js_code = annot.info.get("content")
+                    if js_code:
+                        for i, pattern in enumerate(MALICIOUS_JS_PATTERNS):
+                            if pattern.search(js_code):
+                                js_types[i] = 1
                 annot = annot.next
         document.close()
+        return js_types
     except Exception as e:
         print(f"An error occurred with PyMuPDF: {e}")
-    return 0
+    return [0] * len(MALICIOUS_JS_PATTERNS)
 
 # Function to extract JavaScript using PyPDF2
 def extract_javascript_with_pypdf2(pdf_path):
     try:
         with open(pdf_path, 'rb') as file:
             reader = PyPDF2.PdfReader(file)
+            js_types = [0] * len(MALICIOUS_JS_PATTERNS)
             if "/Names" in reader.trailer["/Root"]:
                 names = reader.trailer["/Root"]["/Names"]
                 if "/JavaScript" in names:
                     js_dict = names["/JavaScript"]["/Names"]
                     for i in range(1, len(js_dict), 2):
                         javascript = js_dict[i].get_object()
-                        if javascript.get("/JS"):
-                            return 1  # JavaScript found
+                        js_code = javascript.get("/JS")
+                        if js_code:
+                            for i, pattern in enumerate(MALICIOUS_JS_PATTERNS):
+                                if pattern.search(js_code):
+                                    js_types[i] = 1
+            return js_types
     except Exception as e:
         print(f"An error occurred with PyPDF2: {e}")
-    return 0
+    return [0] * len(MALICIOUS_JS_PATTERNS)
 
 # Function to extract JSON features from a PDF file
 def extract_json_features_from_pdf(pdf_path):
     pymupdf_result = extract_javascript_with_pymupdf(pdf_path)
     pypdf2_result = extract_javascript_with_pypdf2(pdf_path)
-    if pymupdf_result or pypdf2_result:
-        print(f"JavaScript found in {pdf_path}")
-    return 1 if pymupdf_result or pypdf2_result else 0
+    return [max(p1, p2) for p1, p2 in zip(pymupdf_result, pypdf2_result)]
 
 # Function to create feature matrix from PDFs
 def create_feature_matrix(folder, metadata, cache):
@@ -95,7 +119,7 @@ def create_feature_matrix(folder, metadata, cache):
             document_structure_anomalies = 1 if "document_structure_anomalies" in metadata.get(f"{folder}/{pdf_file}", []) else 0
             acroform_xfa_usage = 1 if "acroform_xfa_usage" in metadata.get(f"{folder}/{pdf_file}", []) else 0
 
-            json_features = [script_behavior, suspicious_object_streams, document_structure_anomalies, acroform_xfa_usage]
+            json_features = script_behavior + [suspicious_object_streams, document_structure_anomalies, acroform_xfa_usage]
             cache[file_hash] = {'json_features': json_features}
 
         features.append(json_features)
